@@ -1,53 +1,4 @@
 #!/usr/bin/env python3
-"""
-s04: Hooks — move extension logic out of the loop, onto hooks.
-
-  User types query
-       │
-       ▼
-  ┌──────────────────┐
-  │ UserPromptSubmit │ ── trigger_hooks() before LLM
-  └────────┬─────────┘
-           ▼
-  ┌────────────┐     ┌─────────────────────────────┐
-  │  messages  │────▶│  LLM (stop_reason=tool_use?)│
-  └────────────┘     │   No ──▶ Stop hooks ──▶ exit │
-                     │   Yes ──▶ tool_use block ──┐ │
-                     └────────────────────────────┘ │
-                                                    ▼
-                                          ┌──────────────────┐
-                                          │ trigger_hooks()   │
-                                          │  PreToolUse:      │
-                                          │   permission_hook │
-                                          │   log_hook        │
-                                          └───────┬──────────┘
-                                                  │ (not blocked)
-                                          ┌───────▼──────────┐
-                                          │ TOOL_HANDLERS[x]  │
-                                          └───────┬──────────┘
-                                                  │
-                                          ┌───────▼──────────┐
-                                          │ trigger_hooks()   │
-                                          │  PostToolUse:     │
-                                          │   large_output    │
-                                          └───────┬──────────┘
-                                                  │
-                                          results ──▶ back to messages
-
-Changes from s03:
-  + HOOKS registry (event -> list of callbacks)
-  + register_hook() / trigger_hooks()
-  + context_inject_hook (UserPromptSubmit)
-  + permission_hook, log_hook (PreToolUse)
-  + large_output_hook (PostToolUse)
-  + summary_hook (Stop)
-  - check_permission() removed from loop body
-    (logic moved into permission_hook, triggered via PreToolUse)
-
-Run: python s04_hooks/code.py
-Needs: pip install anthropic python-dotenv + ANTHROPIC_API_KEY in .env
-"""
-
 import os, subprocess
 from pathlib import Path
 
@@ -71,12 +22,19 @@ WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 CURRENT_TODOS: list[dict] = []
-# s05 change: SYSTEM prompt adds planning guidance
+
 SYSTEM = (
     f"You are a coding agent at {WORKDIR}. "
-    "Before starting any multi-step task, use todo_write to plan your steps. "
-    "Update status as you go."
+    "For complex sub-problems, use the task tool to spawn a subagent."
 )
+
+# s06: subagent gets its own system prompt — no task, no recursion
+SUB_SYSTEM = (
+    f"You are a coding agent at {WORKDIR}. "
+    "Complete the task you were given, then return a concise summary. "
+    "Do not delegate further."
+)
+
 # ═══════════════════════════════════════════════════════════
 #  FROM s02-s03 (unchanged): Tool Implementations
 # ═══════════════════════════════════════════════════════════
@@ -194,6 +152,88 @@ TOOL_HANDLERS = {
     "edit_file": run_edit, "glob": run_glob,"todo_write": run_todo_write,
 }
 
+
+# ═══════════════════════════════════════════════════════════
+#  NEW in s06: Subagent — fresh messages[], summary only
+# ═══════════════════════════════════════════════════════════
+
+SUB_TOOLS = [
+    {"name": "bash", "description": "Run a shell command.",
+     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+    {"name": "read_file", "description": "Read file contents.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
+    {"name": "write_file", "description": "Write content to a file.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
+    {"name": "edit_file", "description": "Replace exact text in a file once.",
+     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+    {"name": "glob", "description": "Find files matching a glob pattern.",
+     "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}},
+]
+# NO "task" tool — prevent recursive spawning
+
+SUB_HANDLERS = {
+    "bash": run_bash, "read_file": run_read, "write_file": run_write,
+    "edit_file": run_edit, "glob": run_glob,
+}
+
+def extract_text(content) -> str:
+    """Extract text from message content blocks."""
+    if not isinstance(content, list):
+        return str(content)
+    return "\n".join(getattr(b, "text", "") for b in content if getattr(b, "type", None) == "text")
+
+def spawn_subagent(description: str) -> str:
+    """Spawn a subagent with fresh messages[], return summary only."""
+    print(f"\n\033[35m[Subagent spawned]\033[0m")
+    messages = [{"role": "user", "content": description}]  # fresh context
+
+    for _ in range(30):  # safety limit
+        response = client.messages.create(
+            model=MODEL, system=SUB_SYSTEM,
+            messages=messages, tools=SUB_TOOLS, max_tokens=8000,
+        )
+        messages.append({"role": "assistant", "content": response.content})
+        if response.stop_reason != "tool_use":
+            break
+        results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                # Issue 1: subagent also runs hooks (permissions apply)
+                blocked = trigger_hooks("PreToolUse", block)
+                if blocked:
+                    results.append({"type": "tool_result", "tool_use_id": block.id,
+                                    "content": str(blocked)})
+                    continue
+                handler = SUB_HANDLERS.get(block.name)
+                output = handler(**block.input) if handler else f"Unknown: {block.name}"
+                trigger_hooks("PostToolUse", block, output)
+                print(f"  \033[90m[sub] {block.name}: {str(output)[:100]}\033[0m")
+                results.append({"type": "tool_result", "tool_use_id": block.id,
+                                "content": output})
+        messages.append({"role": "user", "content": results})
+
+    # Issue 5: fallback if safety limit hit during tool_use
+    result = extract_text(messages[-1]["content"])
+    if not result:
+        # last message is tool_result, look backwards for assistant text
+        for msg in reversed(messages):
+            if msg["role"] == "assistant":
+                result = extract_text(msg["content"])
+                if result:
+                    break
+        if not result:
+            result = "Subagent stopped after 30 turns without final answer."
+    print(f"\033[35m[Subagent done]\033[0m")
+    return result  # only summary, entire message history discarded
+
+
+# Add task tool to parent's tools
+TOOLS.append({
+    "name": "task",
+    "description": "Launch a subagent to handle a complex subtask. Returns only the final conclusion.",
+    "input_schema": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]},
+})
+TOOL_HANDLERS["task"] = spawn_subagent
 
 # ═══════════════════════════════════════════════════════════
 #  NEW in s04: Hook System (s03 permission logic now via hooks)
@@ -326,7 +366,7 @@ def agent_loop(messages: list):
 
 
 if __name__ == "__main__":
-    print("s04: Hooks — extension logic on hooks, loop stays clean")
+    print("s06: Subagent — spawn sub-agents with fresh context, summary only")
     print("Type a question, press Enter. Type q to quit.\n")
 
     history = []
@@ -344,5 +384,3 @@ if __name__ == "__main__":
             if getattr(block, "type", None) == "text":
                 print(block.text)
         print()
-        #Refactor cp5-todo-write/example/hello.py: add type hints, docstrings, and a main guard
-#Create a Python package under cp5-todo-write/example/demo_pkg with __init__.py, utils.py, and tests/test_utils.py
