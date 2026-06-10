@@ -1,0 +1,5 @@
+- [project-deploy-alibaba-ecs](project-deploy-alibaba-ecs.md) — Deployed on Alibaba Cloud ECS
+- [project-name-tyield](project-name-tyield.md) — Project name is tyield
+- [project-python-version](project-python-version.md) — Project uses Python 3.12
+- [project-test-framework-pytest](project-test-framework-pytest.md) — Testing framework is pytest
+- [user-code-style-preference](user-code-style-preference.md) — 用户偏好使用 tab 缩进、驼峰命名变量和单引号字符串
