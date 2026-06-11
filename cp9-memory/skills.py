@@ -1,4 +1,4 @@
-"""Skill system: parsing, registry, and system prompt building."""
+"""Skill system: parsing, registry, and skill loading."""
 
 import yaml
 from pathlib import Path
@@ -44,7 +44,7 @@ _scan_skills()
 
 
 # ═══════════════════════════════════════════════════════════
-#  System Prompt
+#  Skill Listing (used by prompt.py to build system prompt)
 # ═══════════════════════════════════════════════════════════
 
 def list_skills() -> str:
@@ -53,20 +53,6 @@ def list_skills() -> str:
         return "(no skills found)"
     return "\n".join(f"- **{s['name']}**: {s['description']}" for s in SKILL_REGISTRY.values())
 
-def build_system() -> str:
-    """Build SYSTEM prompt with skill catalog + memory index."""
-    from memory import read_memory_index  # lazy import to avoid circular dependency
-    catalog = list_skills()
-    index = read_memory_index()
-    memories_section = f"\n\nMemories available:\n{index}" if index else ""
-    return (
-        f"You are a coding agent at {WORKDIR}. "
-        f"Skills available:\n{catalog}\n"
-        "Use load_skill to get full details when needed."
-        f"{memories_section}\n"
-        "Relevant memories are injected below. Respect user preferences from memory.\n"
-        "When the user says 'remember' or expresses a clear preference, extract it as a memory."
-    )
 
 # Subagent gets its own system prompt — no skill loading, no task, no memory
 SUB_SYSTEM = (

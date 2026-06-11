@@ -47,6 +47,65 @@ TOOL_RESULTS_DIR = WORKDIR / ".task_outputs" / "tool-results"
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 
+# ── Prompt Sections ──
+
+PROMPT_SECTIONS = {
+    "identity": "You are a coding agent. Act, don't explain.",
+    "tools": "Available tools: bash, read_file, write_file.",
+    "workspace": f"Working directory: {WORKDIR}",
+    "memory": "Relevant memories are injected below when available.",
+}
+
+
+def assemble_system_prompt(context: dict) -> str:
+    """Select and join prompt sections based on current context."""
+    sections = []
+
+    # Always loaded — identity, tools, workspace
+    sections.append(PROMPT_SECTIONS["identity"])
+    sections.append(PROMPT_SECTIONS["tools"])
+    sections.append(PROMPT_SECTIONS["workspace"])
+
+    # Conditional — memory loaded when MEMORY.md exists and has content
+    memories = context.get("memories", "")
+    if memories:
+        sections.append(f"Relevant memories:\n{memories}")
+
+    return "\n\n".join(sections)
+
+_last_context_key = None
+_last_prompt = None
+
+def get_system_prompt(context: dict) -> str:
+    global _last_context_key, _last_prompt
+    key = json.dumps(context, sort_keys=True, ensure_ascii=False, default=str)
+    if key == _last_context_key and _last_prompt:
+        print("  \033[90m[cache hit] system prompt unchanged\033[0m")
+        return _last_prompt
+    _last_context_key = key
+    _last_prompt = assemble_system_prompt(context)
+
+    loaded = ["identity", "tools", "workspace"]
+    if context.get("memories"):
+        loaded.append("memory")
+    print(f"  \033[32m[assembled] sections: {', '.join(loaded)}\033[0m")
+    return _last_prompt
+
+# ── Context ──
+
+def update_context(context: dict, messages: list) -> dict:
+    """Derive context from real state: which tools exist, whether memory files exist."""
+    memories = ""
+    if MEMORY_INDEX.exists():
+        content = MEMORY_INDEX.read_text().strip()
+        if content:
+            memories = content
+    return {
+        "enabled_tools": list(TOOL_HANDLERS.keys()),
+        "workspace": str(WORKDIR),
+        "memories": memories,
+    }
+
 
 # ═══════════════════════════════════════════════════════════
 #  NEW in s09: Memory System
@@ -351,23 +410,6 @@ def consolidate_memories():
     except Exception:
         pass
 
-"""
-提示词注入
-两层注入
-1. 索引：始终再system prompt中，告诉agent有哪些记忆
-2. 内容：只注入与当前对话相关的，节省token
-"""
-# Build SYSTEM with memory index
-def build_system() -> str:
-    index = read_memory_index()
-    memories_section = f"\n\nMemories available:\n{index}" if index else ""
-    return (
-        f"You are a coding agent at {WORKDIR}."
-        f"{memories_section}\n"
-        "Relevant memories are injected below. Respect user preferences from memory.\n"
-        "When the user says 'remember' or expresses a clear preference, extract it as a memory."
-    )
-
 SUB_SYSTEM = (
     f"You are a coding agent at {WORKDIR}. "
     "Complete the task you were given, then return a concise summary. "
@@ -604,13 +646,13 @@ TOOL_HANDLERS = {
 
 MAX_REACTIVE_RETRIES = 1
 
-def agent_loop(messages: list):
+def agent_loop(messages: list,context: dict):
     reactive_retries = 0
     # s09: inject relevant memory content into the current user turn
     memories_content = load_memories(messages)
     memory_turn = len(messages) - 1 if messages and isinstance(messages[-1].get("content"), str) else None
     # s09: build system once per user turn; memory is updated after the loop returns
-    system = build_system()
+    system = get_system_prompt(context)
 
     while True:
         # s09: save pre-compression snapshot for accurate memory extraction
@@ -652,6 +694,8 @@ def agent_loop(messages: list):
             extract_memories(pre_compress)
             consolidate_memories()
             return
+        context = update_context(context,messages)
+        system = get_system_prompt(context)
 
         results = []
         for block in response.content:
@@ -665,15 +709,17 @@ def agent_loop(messages: list):
 
 
 if __name__ == "__main__":
-    print("s09: Memory — persistent cross-session knowledge")
-    print("输入问题，回车发送。输入 q 退出。\n")
+    print("s10: system prompt — runtime assembly")
+    print("Enter a question, press Enter to send. Type q to quit.\n")
+    context = update_context({}, [])
     history = []
     while True:
         try: query = input("\033[36ms09 >> \033[0m")
         except (EOFError, KeyboardInterrupt): break
         if query.strip().lower() in ("q", "exit", ""): break
         history.append({"role": "user", "content": query})
-        agent_loop(history)
+        agent_loop(history,context)
+        context = update_context(context, history)
         for block in history[-1]["content"]:
             if getattr(block, "type", None) == "text": print(block.text)
         print()

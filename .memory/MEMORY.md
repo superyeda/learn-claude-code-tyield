@@ -1,3 +1,4 @@
+- [mimo-skills-overview](mimo-skills-overview.md) — Overview of MiMo's core skills and capabilities.
 - [project-deploy-alibaba-ecs](project-deploy-alibaba-ecs.md) — Deployed on Alibaba Cloud ECS
 - [project-name-tyield](project-name-tyield.md) — Project name is tyield
 - [project-python-version](project-python-version.md) — Project uses Python 3.12

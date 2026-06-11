@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-s09: Memory — persistent cross-session knowledge.
+s09: Memory + Dynamic System Prompt
 
 Refactored into modules:
   - config.py:   paths, client, constants
   - tools.py:    tool implementations + registry
   - hooks.py:    hook system + implementations
-  - skills.py:   skill system + system prompts
+  - skills.py:   skill registry + loading
+  - prompt.py:   dynamic system prompt (section assembly + caching)
   - subagent.py: subagent spawning
   - compact.py:  context compaction pipeline (L1-L4)
   - memory.py:   memory system (load/extract/consolidate)
@@ -18,6 +19,7 @@ from tools import TOOLS, TOOL_HANDLERS
 from skills import load_skill
 from subagent import spawn_subagent
 from compact import compact_history
+from prompt import update_context
 from loop import agent_loop
 
 
@@ -52,9 +54,10 @@ register_all_hooks()
 # ═══════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("s09: Memory — persistent cross-session knowledge")
+    print("s09: Memory + Dynamic System Prompt")
     print("输入问题，回车发送。输入 q 退出。\n")
 
+    context = update_context({}, [])
     history = []
     while True:
         try:
@@ -65,7 +68,8 @@ if __name__ == "__main__":
             break
         trigger_hooks("UserPromptSubmit", query)
         history.append({"role": "user", "content": query})
-        agent_loop(history)
+        agent_loop(history, context)
+        context = update_context(context, history)
         for block in history[-1]["content"]:
             if getattr(block, "type", None) == "text":
                 print(block.text)

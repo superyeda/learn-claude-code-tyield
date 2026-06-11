@@ -2,7 +2,7 @@
 
 import config
 from config import client, MODEL, CONTEXT_LIMIT, MAX_REACTIVE_RETRIES
-from skills import build_system
+from prompt import get_system_prompt, update_context
 from tools import TOOLS, TOOL_HANDLERS
 from hooks import trigger_hooks
 from compact import estimate_size, snip_compact, micro_compact, tool_result_budget, compact_history, reactive_compact
@@ -11,14 +11,14 @@ from memory import load_memories, extract_memories, consolidate_memories
 
 rounds_since_todo = 0
 
-def agent_loop(messages: list):
+def agent_loop(messages: list, context: dict):
     global rounds_since_todo
 
     # s09: inject relevant memory content into the current user turn
     memories_content = load_memories(messages)
     memory_turn = len(messages) - 1 if messages and isinstance(messages[-1].get("content"), str) else None
-    # s09: build system each turn; memory index may update after extraction
-    system = build_system()
+    # s09: build system prompt from context (cached if unchanged)
+    system = get_system_prompt(context)
 
     while True:
         # s09: save pre-compression snapshot for accurate memory extraction
@@ -69,6 +69,10 @@ def agent_loop(messages: list):
                 messages.append({"role": "user", "content": force})
                 continue
             return
+
+        # Update context after tool_use (memory files may have changed)
+        context = update_context(context, messages)
+        system = get_system_prompt(context)
 
         rounds_since_todo += 1
         results = []
